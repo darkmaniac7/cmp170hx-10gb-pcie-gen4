@@ -1,0 +1,4 @@
+pcie-gen2-scaffolding-only.patch
+pcie-gen3-gsp.patch
+pcie-gen3-fuse-override.patch
+pcie-gen4-g4.patch

@@ -1,0 +1,65 @@
+# cmpunlocker gen3: post-GSP Gen3 register sequence in kgspBootstrap_TU102 (gated on CmpGen3=1 registry dword, device 0x2082).
+# Source: lixiangwuxian/170hx_tips Gen3_unlock_en.md. Target: open-gpu-kernel-modules 615.71.09 (after cmpunlocker core patches).
+--- a/src/nvidia/src/kernel/gpu/gsp/arch/turing/kernel_gsp_tu102.c
++++ b/src/nvidia/src/kernel/gpu/gsp/arch/turing/kernel_gsp_tu102.c
+@@ -481,6 +481,60 @@
+         }
+     }
+ 
++    /* cmpunlocker gen3 (lixiangwuxian/170hx_tips Gen3_unlock_en.md):
++     * after successful initial-boot BooterLoad, before the final error handling.
++     * Requires the probe-time fuse override and normal CMP init. Gated on the
++     * CmpGen3 registry dword; CmpGen3=0 (or absent) skips this entirely.
++     * Sets the internal PCIe Gen3 config + directed speed change. Actual Gen3
++     * link establishment is confirmed later from PCIe LnkSta, not from here. */
++    if (status == NV_OK && (pGpu->idInfo.PCIDeviceID >> 16) == 0x2082)
++    {
++        NvU32 enableGen3 = 0;
++        (void)osReadRegistryDword(pGpu, "CmpGen3", &enableGen3);
++        if (enableGen3 == 1)
++        {
++            NvU32 v, dlmgr, i;
++            v = GPU_REG_RD32(pGpu, 0x0008841c);
++            v = (v | (1U << 11) | (1U << 13)) &
++                ~((1U << 12) | (1U << 14) | 0xc0000000U);
++            GPU_REG_WR32(pGpu, 0x0008841c, v);
++            v = GPU_REG_RD32(pGpu, 0x0008c2c0);
++            GPU_REG_WR32(pGpu, 0x0008c2c0, v & ~((1U << 2) | (1U << 3)));
++            v = GPU_REG_RD32(pGpu, 0x000880a8);
++            GPU_REG_WR32(pGpu, 0x000880a8, (v & ~0xfU) | 3U);
++            v = GPU_REG_RD32(pGpu, 0x0008c1c0);
++            GPU_REG_WR32(pGpu, 0x0008c1c0, (v & ~0x000f0000U) | (3U << 16));
++            v = GPU_REG_RD32(pGpu, 0x00088610);
++            GPU_REG_WR32(pGpu, 0x00088610, v | 0x1000U);
++            v = GPU_REG_RD32(pGpu, 0x0008c040);
++            /* Internal rate encoding: 1 means 8 GT/s here. */
++            GPU_REG_WR32(pGpu, 0x0008c040, (v & ~0x000c0000U) | (1U << 18));
++            dlmgr = GPU_REG_RD32(pGpu, 0x0008b8c0);
++            GPU_REG_WR32(pGpu, 0x0008b8c0, dlmgr | 4U);
++            for (i = 0; i < 100000; i++)
++            {
++                v = GPU_REG_RD32(pGpu, 0x0008c040);
++                if (v == 0xffffffffU || (v & 0x1fU) == 0) break;
++            }
++            if (v != 0xffffffffU && (v & 0x1fU) == 0)
++            {
++                GPU_REG_WR32(pGpu, 0x0008c040, (v & ~0xfU) | 1U);
++                for (i = 0; i < 100000; i++)
++                {
++                    v = GPU_REG_RD32(pGpu, 0x0008c040);
++                    if (v == 0xffffffffU || (v & 0x1fU) == 0) break;
++                }
++            }
++            if (v != 0xffffffffU)
++                GPU_REG_WR32(pGpu, 0x0008b8c0, dlmgr);
++            if (v != 0xffffffffU && (v & 0x1fU) == 0)
++                GPU_REG_WR32(pGpu, 0x0008872c, 8U);
++            /* Timeout or inaccessible registers must not be reported as success.
++             * Actual success is checked later using PCIe LnkSta.
++             */
++        }
++    }
++
+     if (status != NV_OK)
+     {
+         NV_PRINTF(LEVEL_ERROR, "failed to execute Booter Load (ucode for initial boot): 0x%x\n", status);

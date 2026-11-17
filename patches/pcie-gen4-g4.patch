@@ -1,0 +1,173 @@
+# Variant B+G4: gated Gen4 additions on top of Variant B (core + gen2 booter scaffolding + gen3 gsp + gen3 fuse-override).
+# nv-pci.c: cmp_fuse_gen4 / cmp_fuse_magicd_clr (MAGIC_D 0x820520 RMW). tu102: CmpGen4=1 E1 Gen4 PHY-init replay, only if MAGIC_D bit25 clear. No 0x881C0 write.
+--- a/kernel-open/nvidia/nv-pci.c
++++ b/kernel-open/nvidia/nv-pci.c
+@@ -2169,6 +2169,11 @@
+ #define CMP_FUSE_DISABLE_SW_OVERRIDE    0x00820084
+ /* must cover the highest register in cmp_fuse_regs (0x82382C) */
+ #define CMP_FUSE_MAP_SIZE               0x00824000
++/* gen4: PCIE_MAGIC_BITS_D. bit25 = GEN4_SPEED_DISABLED; 19/22/26/28 = the other
++ * Gen4 bits (A100 MAGIC_D = 0x00200000, CMP stock = 0x16680000). */
++#define CMP_FUSE_MAGIC_D                0x00820520
++#define CMP_FUSE_MAGIC_D_GEN4_DIS       0x02000000
++#define CMP_FUSE_MAGIC_D_GEN4_BITS      0x16480000
+ 
+ static char *cmp_fuse_bdf  = "";
+ static int cmp_fuse_gpc    = -1;
+@@ -2191,6 +2196,8 @@
+ static int cmp_fuse_ecc_ovr2 = -1;
+ static int cmp_fuse_ecc_ovr3 = -1;
+ static int cmp_fuse_flr    = 0;
++static int cmp_fuse_gen4   = -1;
++static int cmp_fuse_magicd_clr = 0;
+ module_param(cmp_fuse_bdf,    charp, 0444);
+ module_param(cmp_fuse_gpc,    int, 0444);
+ module_param(cmp_fuse_tpc0,   int, 0444);
+@@ -2212,6 +2219,8 @@
+ module_param(cmp_fuse_ecc_ovr2, int, 0444);
+ module_param(cmp_fuse_ecc_ovr3, int, 0444);
+ module_param(cmp_fuse_flr,    int, 0444);
++module_param(cmp_fuse_gen4,   int, 0444);
++module_param(cmp_fuse_magicd_clr, int, 0444);
+ MODULE_PARM_DESC(cmp_fuse_bdf,    "CMP 170HX: only apply fuse overrides to this PCI BDF (empty = all)");
+ MODULE_PARM_DESC(cmp_fuse_gpc,    "CMP 170HX: OPT_GPC_DISABLE_CP override at probe (-1 = off)");
+ MODULE_PARM_DESC(cmp_fuse_fbp,    "CMP 170HX: OPT_FBP_DISABLE_CP override at probe (-1 = off)");
+@@ -2224,6 +2233,8 @@
+ MODULE_PARM_DESC(cmp_fuse_ecc_ovr,  "CMP 170HX: FEATURE_OVERRIDE_ECC (0x82380c) direct write at probe, e.g. 0x999999 (-1 = off)");
+ MODULE_PARM_DESC(cmp_fuse_ecc_ovr2, "CMP 170HX: 0x823810 ECC feature override direct write at probe, e.g. 0x3ffebf (-1 = off)");
+ MODULE_PARM_DESC(cmp_fuse_ecc_ovr3, "CMP 170HX: 0x82382c ECC feature override direct write at probe, e.g. 0xf (-1 = off)");
++MODULE_PARM_DESC(cmp_fuse_gen4,   "CMP 170HX: PCIE_MAGIC_BITS_D (0x820520) bit25 GEN4_SPEED_DISABLED value written at probe, read-modify-write (0 = allow Gen4, -1 = off)");
++MODULE_PARM_DESC(cmp_fuse_magicd_clr, "CMP 170HX: extra PCIE_MAGIC_BITS_D bits to clear at probe, read-modify-write; only bits 19,22,25,26,28 (mask 0x16480000) accepted; 0x14480000 with cmp_fuse_gen4=0 gives A100 parity 0x00200000 (0 = off)");
+ 
+ /* cp == 0: no _CP shadow, write the OPT register directly */
+ static const struct
+@@ -2280,6 +2291,9 @@
+         if (*cmp_fuse_regs[i].param >= 0)
+             requested = NV_TRUE;
+     }
++    /* cmpunlocker gen4: the MAGIC_D override also counts as a request */
++    if ((cmp_fuse_gen4 >= 0) || (cmp_fuse_magicd_clr != 0))
++        requested = NV_TRUE;
+     if (!requested)
+         return;
+ 
+@@ -2360,6 +2374,45 @@
+     }
+ 
+     /*
++     * cmpunlocker gen4: PCIE_MAGIC_BITS_D (0x820520), read-modify-write only.
++     * cmp_fuse_gen4 writes bit25 (GEN4_SPEED_DISABLED); cmp_fuse_magicd_clr may
++     * additionally clear the other Gen4 bits (19/22/26/28). Any mask bit outside
++     * 0x16480000 makes the whole mask be ignored. Every other bit is preserved.
++     * VOLATILE like the rest of this override; skipped entirely when both are off.
++     */
++    if ((cmp_fuse_gen4 >= 0) || (cmp_fuse_magicd_clr != 0))
++    {
++        NvU32 clr = 0, set = 0, before, want, after;
++
++        if (cmp_fuse_gen4 >= 0)
++        {
++            if (cmp_fuse_gen4 & 1)
++                set |= CMP_FUSE_MAGIC_D_GEN4_DIS;
++            else
++                clr |= CMP_FUSE_MAGIC_D_GEN4_DIS;
++        }
++        if (cmp_fuse_magicd_clr != 0)
++        {
++            if (((NvU32)cmp_fuse_magicd_clr & ~(NvU32)CMP_FUSE_MAGIC_D_GEN4_BITS) != 0)
++                dev_err(&pci_dev->dev,
++                        "CMP fuse: magicd_clr=0x%08x has bits outside 0x%08x; ignoring the mask\n",
++                        (NvU32)cmp_fuse_magicd_clr, (NvU32)CMP_FUSE_MAGIC_D_GEN4_BITS);
++            else
++                clr |= (NvU32)cmp_fuse_magicd_clr;
++        }
++        clr &= ~set;
++        before = readl(bar0 + CMP_FUSE_MAGIC_D);
++        want   = (before & ~clr) | set;
++        if (want != before)
++            writel(want, bar0 + CMP_FUSE_MAGIC_D);
++        after  = readl(bar0 + CMP_FUSE_MAGIC_D);
++        dev_warn(&pci_dev->dev,
++                 "CMP fuse: magic_d before=0x%08x clear=0x%08x set=0x%08x want=0x%08x after=0x%08x (rmw)%s\n",
++                 before, clr, set, want, after,
++                 (after != want) ? " (DID NOT STICK)" : "");
++    }
++
++    /*
+      * cmpunlocker: cmp_fuse_flr=1 -- floorsweep masks are latched at GPU
+      * reset; request a function-level reset after the _CP override so the
+      * fuse block re-evaluates the SW override. Diagnostic: read back
+--- a/src/nvidia/src/kernel/gpu/gsp/arch/turing/kernel_gsp_tu102.c
++++ b/src/nvidia/src/kernel/gpu/gsp/arch/turing/kernel_gsp_tu102.c
+@@ -535,6 +535,71 @@
+         }
+     }
+ 
++    /* cmpunlocker gen4 (Variant B+G4): runtime replay of the A100 DevInit Gen4
++     * PHY-init block that the CMP VBIOS suppresses ("E1", CMPGlitch cmp_gen4.md).
++     * Runs AFTER the Gen3 block so it raises the caps the Gen3 block set.
++     * Gated on CmpGen4=1 AND on this device's MAGIC_D bit25 already being clear
++     * (cmp_fuse_gen4=0 took effect on THIS card), so a card without the Gen4 fuse
++     * override is never touched. Read-modify-write except the one-shot 0x88CE4
++     * init value. No directed speed change here: Gen4 is trained afterwards by a
++     * host config-space retrain (cmp-gen4.sh); RM SET_PCIE_SPEED(4) is rejected
++     * by GSP-RM (0x56) on GA100 CMP. Deliberately NOT done: the 0x881C0
++     * SYSTEM_MAX_SPEED Booter write (wedges GSP boot, CMPGlitch E2/E3). */
++    if (status == NV_OK && (pGpu->idInfo.PCIDeviceID >> 16) == 0x2082)
++    {
++        NvU32 enableGen4 = 0;
++        (void)osReadRegistryDword(pGpu, "CmpGen4", &enableGen4);
++        if (enableGen4 == 1)
++        {
++            NvU32 magicD = GPU_REG_RD32(pGpu, 0x00820520);
++            NvU32 enableGen3Chk = 0;
++            (void)osReadRegistryDword(pGpu, "CmpGen3", &enableGen3Chk);
++            if (enableGen3Chk != 1)
++                NV_PRINTF(LEVEL_ERROR,
++                          "SEC2_DEBUG: CMP Gen4: warning CmpGen3!=1; Gen4 is trained from a Gen3 link\n");
++            if (magicD == 0xffffffffU || (magicD & 0x02000000U) != 0)
++            {
++                NV_PRINTF(LEVEL_ERROR,
++                          "SEC2_DEBUG: CMP Gen4: skipped, MAGIC_D=0x%08x (bit25 still set: no cmp_fuse_gen4=0 on this device)\n",
++                          magicD);
++            }
++            else
++            {
++                NvU32 v, ce4B, ce0B, cyaB, plB, lc0B;
++                ce4B = GPU_REG_RD32(pGpu, 0x00088ce4);
++                GPU_REG_WR32(pGpu, 0x00088ce4, 0x00000014U);
++                ce0B = GPU_REG_RD32(pGpu, 0x00088ce0);
++                GPU_REG_WR32(pGpu, 0x00088ce0, (ce0B & ~0x3fU) | 0x06U);
++                cyaB = GPU_REG_RD32(pGpu, 0x0008c2c0);
++                GPU_REG_WR32(pGpu, 0x0008c2c0,
++                             cyaB & ~((1U << 0) | (1U << 2) | (1U << 3) | (1U << 13) | (1U << 23)));
++                plB = GPU_REG_RD32(pGpu, 0x0008c1c0);
++                GPU_REG_WR32(pGpu, 0x0008c1c0, (plB & ~0x000f0000U) | (4U << 16));
++                lc0B = GPU_REG_RD32(pGpu, 0x0008c040);
++                /* LINK_CONFIG_0 SPEED[19:18] reversed encoding: 0 = Gen4 max */
++                GPU_REG_WR32(pGpu, 0x0008c040, lc0B & ~0x000c0000U);
++                v = GPU_REG_RD32(pGpu, 0x00088610);
++                GPU_REG_WR32(pGpu, 0x00088610, v | 0x00001001U);
++                v = GPU_REG_RD32(pGpu, 0x0008841c);
++                v = (v | (1U << 11) | (1U << 13)) &
++                    ~((1U << 12) | (1U << 14) | 0xc0000000U);
++                GPU_REG_WR32(pGpu, 0x0008841c, v);
++                NV_PRINTF(LEVEL_ERROR,
++                          "SEC2_DEBUG: CMP Gen4: E1 applied MAGIC_D=0x%08x 88CE4 0x%08x->0x%08x 88CE0 0x%08x->0x%08x CYA_0 0x%08x->0x%08x\n",
++                          magicD, ce4B, GPU_REG_RD32(pGpu, 0x00088ce4),
++                          ce0B, GPU_REG_RD32(pGpu, 0x00088ce0),
++                          cyaB, GPU_REG_RD32(pGpu, 0x0008c2c0));
++                NV_PRINTF(LEVEL_ERROR,
++                          "SEC2_DEBUG: CMP Gen4: E1 PL_RATE 0x%08x->0x%08x LC0 0x%08x->0x%08x VSEC=0x%08x LnkCap=0x%08x LnkCap2=0x%08x\n",
++                          plB, GPU_REG_RD32(pGpu, 0x0008c1c0),
++                          lc0B, GPU_REG_RD32(pGpu, 0x0008c040),
++                          GPU_REG_RD32(pGpu, 0x00088610),
++                          GPU_REG_RD32(pGpu, 0x00088084),
++                          GPU_REG_RD32(pGpu, 0x000880a4));
++            }
++        }
++    }
++
+     if (status != NV_OK)
+     {
+         NV_PRINTF(LEVEL_ERROR, "failed to execute Booter Load (ucode for initial boot): 0x%x\n", status);
