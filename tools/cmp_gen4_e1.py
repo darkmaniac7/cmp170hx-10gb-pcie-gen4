@@ -61,7 +61,7 @@ def main():
             rd = lambda o: struct.unpack_from("<I", m, o)[0]
 
             def wr(o, v):
-                struct.pack_into("<I", m, o, v & 0xFFFFFFFF)
+                mv = memoryview(m)[o:o + 4].cast("I"); mv[0] = v & 0xFFFFFFFF; mv.release()   # one aligned 32-bit store: struct.pack_into writes 0x00000000 first (2026-11-22)
 
             regs = [(DSOV, "DISABLE_SW_OVERRIDE"), (EN_SW, "EN_SW_OVERRIDE"),
                     (MAGIC_D, "MAGIC_D"), (R_CE4, "88CE4"), (R_CE0, "88CE0"),
