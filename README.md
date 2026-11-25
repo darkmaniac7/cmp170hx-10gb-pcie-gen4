@@ -32,7 +32,10 @@ Background, history and community reports:
 - It does not work inside a passthrough VM: the retrain writes the host root port's config space.
 - It is not tested on 8 GB cards (`10de:20c2`). The GSP blocks and the scripts act only on `2082`, but the probe
   fuse override also matches `20c2`. On a host with both kinds of card, limit the override to one 10 GB card with
-  `cmp_fuse_bdf`.
+  `cmp_fuse_bdf`. For an 8 GB card that was glitched and burned (its PCIe fuses cleared), use the 8 GB route instead:
+  [`tools/pcie/`](https://github.com/darkmaniac7/cmp170hx-8gb-vfi-tools/blob/main/tools/pcie/README.md) in
+  cmp170hx-8gb-vfi-tools takes it to Gen3 through the driver and then to Gen4 x16 at every boot, with no patch from
+  this repository. Its RM speed helper is built from `tools/set_pcie_speed.c` here.
 
 ## Requirements
 
